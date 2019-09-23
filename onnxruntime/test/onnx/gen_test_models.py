@@ -9,7 +9,15 @@ from onnx import numpy_helper
 from onnx import helper
 from onnx import utils
 from onnx import AttributeProto, TensorProto, GraphProto
-from scipy.spatial import distance
+
+try:
+    import scipy
+    from scipy.spatial import distance
+    has_scipy = True
+except ImportError:
+    print("scipy is not installed. Some tests cannot be run.")
+    has_scipy = False
+
 
 
 def parse_arguments():
@@ -30,36 +38,73 @@ def write_tensor(f, c,input_name=None):
     body = tensor.SerializeToString()
     f.write(body)
 
+
+def CreateUnaryOpModel(test_folder, input_list, op_name):
+    X = input_list[0]
+    type = onnx.mapping.NP_TYPE_TO_TENSOR_TYPE[X.dtype]
+    os.makedirs(test_folder, exist_ok=True)
+    # Create one output (ValueInfoProto)
+    Y = helper.make_tensor_value_info('Y', type, X.shape)
+    X_INFO = helper.make_tensor_value_info('X', type, X.shape)
+    # Create a node (NodeProto)
+    node_def = helper.make_node(op_name, inputs=['X'], outputs=['Y'])
+    # Create the graph (GraphProto)
+    graph_def = helper.make_graph([node_def], 'test-model', [X_INFO], [Y], [])
+    input_index = 0
+    for t in input_list:
+        input_tensor = numpy_helper.from_array(t)
+        input_tensor.name = 'X'
+        data_dir = os.path.join(test_folder,"test_data_%d" % input_index)
+        os.makedirs(data_dir, exist_ok=True)
+        with open(os.path.join(data_dir,"input_0.pb"),"wb") as f:  
+            f.write(input_tensor.SerializeToString())  
+        input_index += 1
+    # Create the model (ModelProto)
+    model_def = helper.make_model(graph_def, producer_name='onnx-example')
+    #final_model = onnx.utils.polish_model(model_def)
+    final_model = model_def
+    onnx.save(final_model, os.path.join(test_folder, 'model.onnx'))
+  
+def CreateSingleOpModel(top_test_folder, X, op_name, is_raw, has_input):
+    type = onnx.mapping.NP_TYPE_TO_TENSOR_TYPE[X.dtype]
+    if is_raw: 
+        test_folder = os.path.join(top_test_folder,"raw")
+    else:
+        test_folder = os.path.join(top_test_folder,"not_raw")
+    data_dir = os.path.join(test_folder,"test_data_0")
+    os.makedirs(data_dir, exist_ok=True)
+    # Create one output (ValueInfoProto)
+    Y = helper.make_tensor_value_info('Y', type, X.shape)
+    X_INFO = helper.make_tensor_value_info('X', type, X.shape)
+    # Create a node (NodeProto)
+    node_def = helper.make_node(op_name, inputs=['X'], outputs=['Y'])
+    if has_input:
+        # Create the graph (GraphProto)
+        graph_def = helper.make_graph([node_def], 'test-model', [X_INFO], [Y], [])
+        input_tensor = numpy_helper.from_array(X)
+        input_tensor.name = 'X'
+        with open(os.path.join(data_dir,"input_0.pb"),"wb") as f:  
+          f.write(input_tensor.SerializeToString())
+    else:
+        if is_raw:
+            tensor_x = onnx.helper.make_tensor(name='X', data_type=type, dims=X.shape, vals=X.tobytes(),raw=True)
+        else:
+            tensor_x = onnx.helper.make_tensor(name='X', data_type=type, dims=X.shape, vals=X.ravel(),raw=False)
+        graph_def = helper.make_graph([node_def], 'test-model', [X_INFO], [Y], [tensor_x])
+    # Create the model (ModelProto)
+    model_def = helper.make_model(graph_def, producer_name='onnx-example')
+    #final_model = onnx.utils.polish_model(model_def)
+    final_model = model_def
+    if is_raw:
+        onnx.external_data_helper.convert_model_to_external_data(final_model, True)
+    onnx.save(final_model, os.path.join(test_folder, 'model.onnx'))
+    return data_dir
 def generate_abs_op_test(type, X, top_test_folder):
     for is_raw in [True, False]:
-        if is_raw:           
-           test_folder = os.path.join(top_test_folder,"raw")
-        else:
-           test_folder = os.path.join(top_test_folder,"not_raw")
-        data_dir = os.path.join(test_folder,"test_data_0")
-        os.makedirs(data_dir, exist_ok=True)
-        # Create one output (ValueInfoProto)
-        Y = helper.make_tensor_value_info('Y', type, X.shape)
-        X_INFO = helper.make_tensor_value_info('X', type, X.shape)
-        if is_raw:
-          tensor_x = onnx.helper.make_tensor(name='X', data_type=type, dims=X.shape, vals=X.tobytes(),raw=True)
-        else:
-          tensor_x = onnx.helper.make_tensor(name='X', data_type=type, dims=X.shape, vals=X.ravel(),raw=False)
-        # Create a node (NodeProto)
-        node_def = helper.make_node('Abs', inputs=['X'], outputs=['Y'])
-
-        # Create the graph (GraphProto)
-        graph_def = helper.make_graph([node_def], 'test-model', [X_INFO], [Y], [tensor_x])
-        # Create the model (ModelProto)
-        model_def = helper.make_model(graph_def, producer_name='onnx-example')
-        #final_model = onnx.utils.polish_model(model_def)
-        final_model = model_def
-        if is_raw:
-            onnx.external_data_helper.convert_model_to_external_data(final_model, True)
-        onnx.save(final_model, os.path.join(test_folder, 'model.onnx'))
+        data_dir = CreateSingleOpModel(top_test_folder, X, 'Abs', is_raw, False)
         expected_output_array = np.abs(X)
         expected_output_tensor = numpy_helper.from_array(expected_output_array)
-        with open(os.path.join(data_dir,"output_0.pb"),"wb") as f:    
+        with open(os.path.join(data_dir,"output_0.pb"),"wb") as f:  
                 f.write(expected_output_tensor.SerializeToString())
 
 def generate_size_op_test(type, X, test_folder):
@@ -79,7 +124,7 @@ def generate_size_op_test(type, X, test_folder):
     final_model = onnx.utils.polish_model(model_def)
     onnx.save(final_model, os.path.join(test_folder, 'model.onnx'))
     expected_output_array = np.int64(X.size)
-    expected_output_tensor = numpy_helper.from_array(expected_output_array)    
+    expected_output_tensor = numpy_helper.from_array(expected_output_array)  
     with open(os.path.join(data_dir,"output_0.pb"),"wb") as f:    
         f.write(expected_output_tensor.SerializeToString())
 
@@ -126,6 +171,20 @@ def test_size(output_dir):
     generate_size_op_test(TensorProto.FLOAT, np.random.randn(100, 3000, 10).astype(np.float32), os.path.join(output_dir,'test_size_float'))
     generate_size_op_test(TensorProto.STRING, np.array(['abc', 'xy'], dtype=np.bytes_), os.path.join(output_dir,'test_size_string'))
 
+def gen_softmax_test(output_dir, dtype, M, N):
+    test_folder = os.path.join(output_dir,"test_softmax_%s_%d_%d" % (dtype.__name__, M,N))
+    input_list = []
+    for i in range(10):
+        input_list.append(np.random.rand(M, N).astype(dtype))
+    CreateUnaryOpModel(test_folder, input_list, 'Softmax')
+    dataset_id = 0
+    for X in input_list:
+        data_dir = os.path.join(test_folder,"test_data_%d" % dataset_id)
+        expected_output_array = scipy.special.softmax(X)
+        expected_output_tensor = numpy_helper.from_array(expected_output_array)
+        with open(os.path.join(data_dir,"output_0.pb"),"wb") as f:
+          f.write(expected_output_tensor.SerializeToString())
+        ++dataset_id
 
 def gen_cdist_test(output_dir, dtype, M, N, K):
     for mode in ['euclidean', 'sqeuclidean']:
@@ -156,11 +215,17 @@ def test_cdist(output_dir):
         gen_cdist_test(output_dir, dtype, 1000, 2000, 1)
         gen_cdist_test(output_dir, dtype, 1, 1, 1)
 
+def test_softmax(output_dir):
+    for dtype in [np.float32, np.float64] :
+        gen_softmax_test(output_dir, dtype, 1000, 1000)
+        gen_softmax_test(output_dir, dtype, 1, 1000)
+
 args = parse_arguments()
 os.makedirs(args.output_dir,exist_ok=True)
 test_abs(args.output_dir)
 test_size(args.output_dir)
 test_reducesum(args.output_dir)
-test_cdist(args.output_dir)
 
-
+if has_scipy:
+  test_cdist(args.output_dir)
+  test_softmax(args.output_dir)
